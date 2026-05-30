@@ -118,14 +118,22 @@ if (_aurora_dawn_provider STREQUAL "vendor")
       # We do this after population but before add_subdirectory so Dawn's CMake
       # sees the patched fetch script.
       unset(_dawn_patch_script CACHE)
-      find_file(_dawn_patch_script
-        NAMES patch_dawn_abseil_switch.cmake
-        PATHS "${CMAKE_SOURCE_DIR}/ci/switch"
-              "${CMAKE_CURRENT_LIST_DIR}/../../../ci/switch"
-        NO_DEFAULT_PATH
+      set(_dawn_patch_candidates
+        "${CMAKE_SOURCE_DIR}/ci/switch/patch_dawn_abseil_switch.cmake"
+        "${CMAKE_CURRENT_LIST_DIR}/../../../ci/switch/patch_dawn_abseil_switch.cmake"
+        "${PROJECT_SOURCE_DIR}/ci/switch/patch_dawn_abseil_switch.cmake"
       )
+      
+      set(_dawn_patch_script "")
+      foreach(_candidate IN LISTS _dawn_patch_candidates)
+        if (EXISTS "${_candidate}")
+          set(_dawn_patch_script "${_candidate}")
+          break()
+        endif ()
+      endforeach()
+
       if (_dawn_patch_script)
-        message(STATUS "aurora: Applying Switch build patches to Dawn...")
+        message(STATUS "aurora: Applying Switch build patches to Dawn using ${_dawn_patch_script}")
         execute_process(
           COMMAND ${CMAKE_COMMAND}
             -DPATCH_FILE=${dawn_SOURCE_DIR}/tools/fetch_dawn_dependencies.py
@@ -136,7 +144,7 @@ if (_aurora_dawn_provider STREQUAL "vendor")
           message(FATAL_ERROR "aurora: failed to apply Switch build patches to Dawn (exit=${_dawn_patch_rv})")
         endif ()
       else ()
-        message(FATAL_ERROR "aurora: could not find Switch build patch script for Dawn at ${CMAKE_SOURCE_DIR}/ci/switch")
+        message(FATAL_ERROR "aurora: could not find Switch build patch script 'patch_dawn_abseil_switch.cmake'. searched:\n  ${_dawn_patch_candidates}")
       endif ()
     endif ()
 
