@@ -124,18 +124,25 @@ if (_aurora_dawn_provider STREQUAL "vendor")
       endif ()
 
       if (EXISTS "${_dawn_patch_script}")
-        message(STATUS "aurora: Applying Switch build patches to Dawn...")
-        message(STATUS "aurora:   script: ${_dawn_patch_script}")
-        message(STATUS "aurora:   target: ${dawn_SOURCE_DIR}/tools/fetch_dawn_dependencies.py")
+        message(STATUS "aurora: Switch build detected, applying patches...")
+        message(STATUS "aurora:   patch script: ${_dawn_patch_script}")
+        message(STATUS "aurora:   dawn source:  ${dawn_SOURCE_DIR}")
         
         execute_process(
           COMMAND ${CMAKE_COMMAND}
             -DPATCH_FILE=${dawn_SOURCE_DIR}/tools/fetch_dawn_dependencies.py
             -P "${_dawn_patch_script}"
           RESULT_VARIABLE _dawn_patch_rv
+          OUTPUT_VARIABLE _dawn_patch_out
+          ERROR_VARIABLE _dawn_patch_err
         )
         if (NOT _dawn_patch_rv EQUAL 0)
-          message(FATAL_ERROR "aurora: failed to apply Switch build patches to Dawn (exit=${_dawn_patch_rv})")
+          message(FATAL_ERROR "aurora: failed to apply Switch build patches to Dawn.\nexit=${_dawn_patch_rv}\nstdout: ${_dawn_patch_out}\nstderr: ${_dawn_patch_err}")
+        else ()
+          message(STATUS "aurora: successfully patched Dawn fetch script and sources.")
+          if (_dawn_patch_out)
+            message(STATUS "aurora: patch output:\n${_dawn_patch_out}")
+          endif ()
         endif ()
       else ()
         message(FATAL_ERROR "aurora: could not find Switch build patch script 'patch_dawn_abseil_switch.cmake'. searched:\n  ${CMAKE_CURRENT_LIST_DIR}/../ci/switch/patch_dawn_abseil_switch.cmake\n  ${CMAKE_SOURCE_DIR}/ci/switch/patch_dawn_abseil_switch.cmake")
