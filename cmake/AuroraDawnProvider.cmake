@@ -101,23 +101,48 @@ if (_aurora_dawn_provider STREQUAL "vendor")
     endif ()
 
     include(FetchContent)
-    if (DUSK_SWITCH_LIBNX_TOOLCHAIN OR DUSK_EXPERIMENTAL_SWITCH)
-      FetchContent_Declare(dawn
-        URL "https://github.com/google/dawn/archive/refs/tags/${AURORA_DAWN_VERSION}.tar.gz"
-        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-        EXCLUDE_FROM_ALL
-        PATCH_COMMAND ${CMAKE_COMMAND}
-          -DPATCH_FILE=<SOURCE_DIR>/tools/fetch_dawn_dependencies.py
-          -P ${CMAKE_SOURCE_DIR}/ci/switch/patch_dawn_abseil_switch.cmake
-      )
-    else ()
-      FetchContent_Declare(dawn
-        URL "https://github.com/google/dawn/archive/refs/tags/${AURORA_DAWN_VERSION}.tar.gz"
-        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-        EXCLUDE_FROM_ALL
-      )
+    FetchContent_Declare(dawn
+      URL "https://github.com/google/dawn/archive/refs/tags/${AURORA_DAWN_VERSION}.tar.gz"
+      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+      EXCLUDE_FROM_ALL
+    )
+
+    FetchContent_GetProperties(dawn)
+    if (NOT dawn_POPULATED)
+      message(STATUS "aurora: Populating Dawn source...")
+      FetchContent_Populate(dawn)
     endif ()
-    FetchContent_MakeAvailable(dawn)
+
+    if (DUSK_SWITCH_LIBNX_TOOLCHAIN OR DUSK_EXPERIMENTAL_SWITCH)
+      # Robust patching: explicitly apply Switch fixes to Dawn and its dependencies.
+      # We do this after population but before add_subdirectory so Dawn's CMake
+      # sees the patched fetch script.
+      find_file(_dawn_patch_script
+        NAMES patch_dawn_abseil_switch.cmake
+        PATHS "${CMAKE_SOURCE_DIR}/ci/switch"
+              "${CMAKE_CURRENT_LIST_DIR}/../../../ci/switch"
+        NO_DEFAULT_PATH
+      )
+      if (_dawn_patch_script)
+        message(STATUS "aurora: Applying Switch build patches to Dawn...")
+        execute_process(
+          COMMAND ${CMAKE_COMMAND}
+            -DPATCH_FILE=${dawn_SOURCE_DIR}/tools/fetch_dawn_dependencies.py
+            -P "${_dawn_patch_script}"
+          RESULT_VARIABLE _dawn_patch_rv
+        )
+        if (NOT _dawn_patch_rv EQUAL 0)
+          message(FATAL_ERROR "aurora: failed to apply Switch build patches to Dawn (exit=${_dawn_patch_rv})")
+        endif ()
+      else ()
+        message(WARNING "aurora: could not find Switch build patch script for Dawn at ${CMAKE_SOURCE_DIR}/ci/switch")
+      endif ()
+    endif ()
+
+    if (NOT TARGET webgpu_dawn)
+      add_subdirectory(${dawn_SOURCE_DIR} ${dawn_BINARY_DIR} EXCLUDE_FROM_ALL)
+    endif ()
+
     if (DUSK_SWITCH_LIBNX_TOOLCHAIN OR DUSK_EXPERIMENTAL_SWITCH)
       # CI-first hardening: force-generate Dawn native_utils now so clean Forgejo runs
       # don't race into missing dawn_platform_autogen.h / ValidationUtils_autogen.h.
