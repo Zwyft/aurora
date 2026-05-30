@@ -117,23 +117,17 @@ if (_aurora_dawn_provider STREQUAL "vendor")
       # Robust patching: explicitly apply Switch fixes to Dawn and its dependencies.
       # We do this after population but before add_subdirectory so Dawn's CMake
       # sees the patched fetch script.
-      unset(_dawn_patch_script CACHE)
-      set(_dawn_patch_candidates
-        "${CMAKE_SOURCE_DIR}/ci/switch/patch_dawn_abseil_switch.cmake"
-        "${CMAKE_CURRENT_LIST_DIR}/../../../ci/switch/patch_dawn_abseil_switch.cmake"
-        "${PROJECT_SOURCE_DIR}/ci/switch/patch_dawn_abseil_switch.cmake"
-      )
-      
-      set(_dawn_patch_script "")
-      foreach(_candidate IN LISTS _dawn_patch_candidates)
-        if (EXISTS "${_candidate}")
-          set(_dawn_patch_script "${_candidate}")
-          break()
-        endif ()
-      endforeach()
+      set(_dawn_patch_script "${CMAKE_CURRENT_LIST_DIR}/../ci/switch/patch_dawn_abseil_switch.cmake")
+      if (NOT EXISTS "${_dawn_patch_script}")
+        # Fallback to dusk-level path if it exists
+        set(_dawn_patch_script "${CMAKE_SOURCE_DIR}/ci/switch/patch_dawn_abseil_switch.cmake")
+      endif ()
 
-      if (_dawn_patch_script)
-        message(STATUS "aurora: Applying Switch build patches to Dawn using ${_dawn_patch_script}")
+      if (EXISTS "${_dawn_patch_script}")
+        message(STATUS "aurora: Applying Switch build patches to Dawn...")
+        message(STATUS "aurora:   script: ${_dawn_patch_script}")
+        message(STATUS "aurora:   target: ${dawn_SOURCE_DIR}/tools/fetch_dawn_dependencies.py")
+        
         execute_process(
           COMMAND ${CMAKE_COMMAND}
             -DPATCH_FILE=${dawn_SOURCE_DIR}/tools/fetch_dawn_dependencies.py
@@ -144,7 +138,7 @@ if (_aurora_dawn_provider STREQUAL "vendor")
           message(FATAL_ERROR "aurora: failed to apply Switch build patches to Dawn (exit=${_dawn_patch_rv})")
         endif ()
       else ()
-        message(FATAL_ERROR "aurora: could not find Switch build patch script 'patch_dawn_abseil_switch.cmake'. searched:\n  ${_dawn_patch_candidates}")
+        message(FATAL_ERROR "aurora: could not find Switch build patch script 'patch_dawn_abseil_switch.cmake'. searched:\n  ${CMAKE_CURRENT_LIST_DIR}/../ci/switch/patch_dawn_abseil_switch.cmake\n  ${CMAKE_SOURCE_DIR}/ci/switch/patch_dawn_abseil_switch.cmake")
       endif ()
     endif ()
 
