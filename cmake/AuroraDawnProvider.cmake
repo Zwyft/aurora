@@ -117,6 +117,7 @@ if (_aurora_dawn_provider STREQUAL "vendor")
       # Robust patching: explicitly apply Switch fixes to Dawn and its dependencies.
       # We do this after population but before add_subdirectory so Dawn's CMake
       # sees the patched fetch script.
+      unset(_dawn_patch_script CACHE)
       find_file(_dawn_patch_script
         NAMES patch_dawn_abseil_switch.cmake
         PATHS "${CMAKE_SOURCE_DIR}/ci/switch"
@@ -135,7 +136,7 @@ if (_aurora_dawn_provider STREQUAL "vendor")
           message(FATAL_ERROR "aurora: failed to apply Switch build patches to Dawn (exit=${_dawn_patch_rv})")
         endif ()
       else ()
-        message(WARNING "aurora: could not find Switch build patch script for Dawn at ${CMAKE_SOURCE_DIR}/ci/switch")
+        message(FATAL_ERROR "aurora: could not find Switch build patch script for Dawn at ${CMAKE_SOURCE_DIR}/ci/switch")
       endif ()
     endif ()
 
