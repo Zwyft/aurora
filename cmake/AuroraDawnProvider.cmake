@@ -91,6 +91,9 @@ if (_aurora_dawn_provider STREQUAL "vendor")
     endif ()
     set(TINT_BUILD_TESTS OFF CACHE INTERNAL "Build tests")
     set(TINT_BUILD_CMD_TOOLS OFF CACHE INTERNAL "Build the Tint command line tools")
+    if (DUSK_SWITCH_LIBNX_TOOLCHAIN OR DUSK_EXPERIMENTAL_SWITCH)
+      set(DAWN_ENABLE_RTTI ON CACHE INTERNAL "Enable RTTI for Switch/libnx")
+    endif ()
     if (NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY OR CMAKE_MSVC_RUNTIME_LIBRARY MATCHES "DLL$")
       set(ABSL_MSVC_STATIC_RUNTIME OFF CACHE INTERNAL "Link static runtime libraries")
     else ()
@@ -98,12 +101,53 @@ if (_aurora_dawn_provider STREQUAL "vendor")
     endif ()
 
     include(FetchContent)
-    FetchContent_Declare(dawn
-      URL "https://github.com/google/dawn/archive/refs/tags/${AURORA_DAWN_VERSION}.tar.gz"
-      DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-      EXCLUDE_FROM_ALL
-    )
+    if (DUSK_SWITCH_LIBNX_TOOLCHAIN OR DUSK_EXPERIMENTAL_SWITCH)
+      FetchContent_Declare(dawn
+        URL "https://github.com/google/dawn/archive/refs/tags/${AURORA_DAWN_VERSION}.tar.gz"
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        EXCLUDE_FROM_ALL
+        PATCH_COMMAND ${CMAKE_COMMAND}
+          -DPATCH_FILE=<SOURCE_DIR>/tools/fetch_dawn_dependencies.py
+          -P ${CMAKE_SOURCE_DIR}/ci/switch/patch_dawn_abseil_switch.cmake
+      )
+    else ()
+      FetchContent_Declare(dawn
+        URL "https://github.com/google/dawn/archive/refs/tags/${AURORA_DAWN_VERSION}.tar.gz"
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        EXCLUDE_FROM_ALL
+      )
+    endif ()
     FetchContent_MakeAvailable(dawn)
+    if (DUSK_SWITCH_LIBNX_TOOLCHAIN OR DUSK_EXPERIMENTAL_SWITCH)
+      # CI-first hardening: force-generate Dawn native_utils now so clean Forgejo runs
+      # don't race into missing dawn_platform_autogen.h / ValidationUtils_autogen.h.
+      find_package(Python3 REQUIRED COMPONENTS Interpreter)
+      execute_process(
+        COMMAND ${Python3_EXECUTABLE}
+          ${dawn_SOURCE_DIR}/generator/dawn_json_generator.py
+          --template-dir ${dawn_SOURCE_DIR}/generator/templates
+          --root-dir ${dawn_SOURCE_DIR}
+          --output-dir ${dawn_BINARY_DIR}/gen
+          --dawn-json ${dawn_SOURCE_DIR}/src/dawn/dawn.json
+          --wire-json ${dawn_SOURCE_DIR}/src/dawn/dawn_wire.json
+          --kotlin-json ${dawn_SOURCE_DIR}/src/dawn/dawn_kotlin.json
+          --targets native_utils
+          --webgpu-kt-docs ${dawn_SOURCE_DIR}/src/dawn/webgpu_kt_docs.json
+          --jinja2-path ${dawn_SOURCE_DIR}/third_party/jinja2
+          --markupsafe-path ${dawn_SOURCE_DIR}/third_party/markupsafe
+        WORKING_DIRECTORY ${dawn_BINARY_DIR}/src/dawn/native
+        RESULT_VARIABLE _dawn_native_utils_rv
+        OUTPUT_VARIABLE _dawn_native_utils_out
+        ERROR_VARIABLE _dawn_native_utils_err
+      )
+      if (NOT _dawn_native_utils_rv EQUAL 0)
+        message(FATAL_ERROR
+          "aurora: failed to pre-generate Dawn native_utils for Switch.\n"
+          "exit=${_dawn_native_utils_rv}\n"
+          "stdout:\n${_dawn_native_utils_out}\n"
+          "stderr:\n${_dawn_native_utils_err}")
+      endif ()
+    endif ()
     if (NOT TARGET webgpu_dawn)
       message(FATAL_ERROR "Failed to make dawn available")
     endif ()

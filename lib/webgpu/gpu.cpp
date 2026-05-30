@@ -6,6 +6,11 @@
 #include <utility>
 #include <vector>
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#include <EGL/egl.h>
+#endif
+
 #include <aurora/aurora.h>
 #include <aurora/gfx.h>
 #include <magic_enum.hpp>
@@ -29,6 +34,46 @@ void clear_offscreen_cache();
 
 namespace aurora::webgpu {
 static Module Log("aurora::gpu");
+
+// Helper to detect and log graphics capabilities
+void log_graphics_capabilities() {
+#ifdef __ANDROID__
+  __android_log_print(ANDROID_LOG_INFO, "aurora::gpu", "=== Graphics Capability Detection ===");
+  __android_log_print(ANDROID_LOG_INFO, "aurora::gpu", "Checking available graphics APIs...");
+  __android_log_print(ANDROID_LOG_INFO, "aurora::gpu", "Dawn requires at least OpenGL ES 3.1 or Vulkan 1.1");
+  __android_log_print(ANDROID_LOG_INFO, "aurora::gpu", "If this log appears, Dawn initialization is starting");
+  __android_log_print(ANDROID_LOG_INFO, "aurora::gpu", "=====================================");
+  
+  // Just log EGL info, don't create contexts (causes crashes on some devices)
+  EGLDisplay egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+  if (egl_display == EGL_NO_DISPLAY) {
+    __android_log_print(ANDROID_LOG_ERROR, "aurora::gpu", "EGL: No display found");
+    return;
+  }
+  
+  __android_log_print(ANDROID_LOG_INFO, "aurora::gpu", "EGL: Got display %p", egl_display);
+  
+  EGLint major, minor;
+  if (!eglInitialize(egl_display, &major, &minor)) {
+    __android_log_print(ANDROID_LOG_ERROR, "aurora::gpu", "EGL: Failed to initialize");
+    return;
+  }
+  
+  __android_log_print(ANDROID_LOG_INFO, "aurora::gpu", "EGL: Initialized, version %d.%d", major, minor);
+  
+  const char* egl_extensions = eglQueryString(egl_display, EGL_EXTENSIONS);
+  __android_log_print(ANDROID_LOG_INFO, "aurora::gpu", "EGL Extensions: %s", egl_extensions ? egl_extensions : "None");
+  
+  const char* egl_vendor = eglQueryString(egl_display, EGL_VENDOR);
+  __android_log_print(ANDROID_LOG_INFO, "aurora::gpu", "EGL Vendor: %s", egl_vendor ? egl_vendor : "Unknown");
+  
+  const char* egl_version = eglQueryString(egl_display, EGL_VERSION);
+  __android_log_print(ANDROID_LOG_INFO, "aurora::gpu", "EGL Version: %s", egl_version ? egl_version : "Unknown");
+  
+  // Don't create EGL context here - let Dawn handle it
+  __android_log_print(ANDROID_LOG_INFO, "aurora::gpu", "EGL info logged, not creating dummy context");
+#endif
+}
 
 wgpu::Device g_device;
 wgpu::Queue g_queue;
@@ -381,6 +426,11 @@ static bool create_surface() {
     Log.error("Failed to create surface: no window");
     return false;
   }
+  // Always release previous surface completely
+  if (g_surface) {
+    g_surface = {};
+  }
+  
   const auto chainedDescriptor = utils::SetupWindowAndGetSurfaceDescriptor(window);
   if (!chainedDescriptor) {
     Log.error("Failed to create surface descriptor for current window");
@@ -390,7 +440,6 @@ static bool create_surface() {
       .nextInChain = chainedDescriptor.get(),
       .label = "Surface",
   };
-  release_surface();
   g_surface = g_instance.CreateSurface(&surfaceDescriptor);
   if (!g_surface) {
     Log.error("Failed to create surface");
@@ -400,6 +449,8 @@ static bool create_surface() {
 }
 
 bool initialize(AuroraBackend auroraBackend) {
+  log_graphics_capabilities();
+  
   if (!g_instance) {
     Log.info("Creating WebGPU instance");
     const std::array requiredInstanceFeatures{
@@ -420,169 +471,222 @@ bool initialize(AuroraBackend auroraBackend) {
       return false;
     }
   }
-  const wgpu::BackendType backend = to_wgpu_backend(auroraBackend);
-  Log.info("Attempting to initialize {}", magic_enum::enum_name(backend));
-#if 0
-  // D3D12's debug layer is very slow
-  g_dawnInstance->EnableBackendValidation(backend != WGPUBackendType::D3D12);
+  
+  // Force OpenGLES only - TV has OpenGL ES 3.2 support, skip Vulkan/Null
+  const std::array backendsToTry{
+      wgpu::BackendType::OpenGLES,
+      wgpu::BackendType::Null,  // Fallback to software rendering if OpenGLES fails
+  };
+  Log.info("Forcing OpenGLES backend only (OpenGL ES 3.2 available on device)");
+#ifdef __ANDROID__
+  __android_log_print(ANDROID_LOG_INFO, "aurora::gpu", "Forcing OpenGLES backend - skipping Vulkan/Null");
+#endif
+  
+#ifdef __ANDROID__
+  __android_log_print(ANDROID_LOG_INFO, "aurora::gpu", "Starting backend selection loop");
+#endif
+  
+  // Create instance ONCE before the loop
+  if (!g_instance) {
+    Log.info("Creating WebGPU instance");
+#ifdef __ANDROID__
+    __android_log_print(ANDROID_LOG_INFO, "aurora::gpu", "Creating WebGPU instance");
+#endif
+    const std::array requiredInstanceFeatures{
+        wgpu::InstanceFeatureName::TimedWaitAny,
+    };
+    wgpu::InstanceDescriptor instanceDescriptor{
+        .requiredFeatureCount = requiredInstanceFeatures.size(),
+        .requiredFeatures = requiredInstanceFeatures.data(),
+    };
+#ifdef WEBGPU_DAWN
+    dawn::native::DawnInstanceDescriptor dawnInstanceDescriptor;
+    dawnInstanceDescriptor.backendValidationLevel = dawn::native::BackendValidationLevel::Disabled;
+    instanceDescriptor.nextInChain = &dawnInstanceDescriptor;
+#endif
+    g_instance = wgpu::CreateInstance(&instanceDescriptor);
+    if (!g_instance) {
+      Log.error("Failed to create WebGPU instance");
+      return false;
+    }
+  }
+  
+  for (const auto backend : backendsToTry) {
+    Log.info("Attempting to initialize {}", magic_enum::enum_name(backend));
+#ifdef __ANDROID__
+    __android_log_print(ANDROID_LOG_INFO, "aurora::gpu", "Attempting to initialize %s", magic_enum::enum_name(backend).data());
 #endif
 
-  {
-    window::SurfaceLock surfaceLock;
-    if (!create_surface()) {
-      return false;
-    }
-  }
-  {
-    const wgpu::RequestAdapterOptions options{
-        .powerPreference = wgpu::PowerPreference::HighPerformance,
-        .backendType = backend,
-        .compatibleSurface = g_surface,
-    };
-    const auto future = g_instance.RequestAdapter(
-        &options, wgpu::CallbackMode::WaitAnyOnly,
-        [](wgpu::RequestAdapterStatus status, wgpu::Adapter adapter, wgpu::StringView message) {
-          if (status == wgpu::RequestAdapterStatus::Success) {
-            g_adapter = std::move(adapter);
-          } else {
-            Log.warn("Adapter request failed: {}", message);
-          }
-        });
-    const auto status = g_instance.WaitAny(future, 5000000000);
-    if (status != wgpu::WaitStatus::Success) {
-      Log.error("Failed to create adapter: {}", magic_enum::enum_name(status));
-      return false;
-    }
-    if (!g_adapter) {
-      Log.error("Failed to create adapter");
-      return false;
-    }
-  }
-  g_adapter.GetInfo(&g_adapterInfo);
-  g_backendType = g_adapterInfo.backendType;
-  const auto backendName = magic_enum::enum_name(g_backendType);
-  auto adapterName = g_adapterInfo.device;
-  if (adapterName.IsUndefined()) {
-    adapterName = wgpu::StringView("Unknown");
-  }
-  auto description = g_adapterInfo.description;
-  if (description.IsUndefined()) {
-    description = wgpu::StringView("Unknown");
-  }
-  Log.info("Graphics adapter information\n  API: {}\n  Device: {} ({})\n  Driver: {}", backendName, adapterName,
-           magic_enum::enum_name(g_adapterInfo.adapterType), description);
-
-  {
-    wgpu::Limits supportedLimits{};
-    g_adapter.GetLimits(&supportedLimits);
-    const wgpu::Limits requiredLimits{
-        // Use "best" supported limits
-        .maxTextureDimension1D = supportedLimits.maxTextureDimension1D == 0 ? WGPU_LIMIT_U32_UNDEFINED
-                                                                            : supportedLimits.maxTextureDimension1D,
-        .maxTextureDimension2D = supportedLimits.maxTextureDimension2D == 0 ? WGPU_LIMIT_U32_UNDEFINED
-                                                                            : supportedLimits.maxTextureDimension2D,
-        .maxTextureDimension3D = supportedLimits.maxTextureDimension3D == 0 ? WGPU_LIMIT_U32_UNDEFINED
-                                                                            : supportedLimits.maxTextureDimension3D,
-        .maxTextureArrayLayers = supportedLimits.maxTextureArrayLayers == 0 ? WGPU_LIMIT_U32_UNDEFINED
-                                                                            : supportedLimits.maxTextureArrayLayers,
-        .maxDynamicStorageBuffersPerPipelineLayout = supportedLimits.maxDynamicStorageBuffersPerPipelineLayout == 0
-                                                         ? WGPU_LIMIT_U32_UNDEFINED
-                                                         : supportedLimits.maxDynamicStorageBuffersPerPipelineLayout,
-        .maxStorageBuffersPerShaderStage = supportedLimits.maxStorageBuffersPerShaderStage == 0
-                                               ? WGPU_LIMIT_U32_UNDEFINED
-                                               : supportedLimits.maxStorageBuffersPerShaderStage,
-        .minUniformBufferOffsetAlignment =
-            supportedLimits.minUniformBufferOffsetAlignment < 64 ? 64 : supportedLimits.minUniformBufferOffsetAlignment,
-        .minStorageBufferOffsetAlignment =
-            supportedLimits.minStorageBufferOffsetAlignment < 16 ? 16 : supportedLimits.minStorageBufferOffsetAlignment,
-    };
-    Log.info(
-        "Using limits:"
-        "\n  maxTextureDimension1D: {}"
-        "\n  maxTextureDimension2D: {}"
-        "\n  maxTextureDimension3D: {}"
-        "\n  maxTextureArrayLayers: {}"
-        "\n  maxDynamicStorageBuffersPerPipelineLayout: {}"
-        "\n  maxStorageBuffersPerShaderStage: {}"
-        "\n  minUniformBufferOffsetAlignment: {}"
-        "\n  minStorageBufferOffsetAlignment: {}",
-        requiredLimits.maxTextureDimension1D, requiredLimits.maxTextureDimension2D,
-        requiredLimits.maxTextureDimension3D, requiredLimits.maxTextureArrayLayers,
-        requiredLimits.maxDynamicStorageBuffersPerPipelineLayout, requiredLimits.maxStorageBuffersPerShaderStage,
-        requiredLimits.minUniformBufferOffsetAlignment, requiredLimits.minStorageBufferOffsetAlignment);
-    std::vector<wgpu::FeatureName> requiredFeatures;
-    wgpu::SupportedFeatures supportedFeatures;
-    g_adapter.GetFeatures(&supportedFeatures);
-    for (size_t i = 0; i < supportedFeatures.featureCount; ++i) {
-      const auto feature = supportedFeatures.features[i];
-      if (feature == wgpu::FeatureName::TextureCompressionBC) {
-        requiredFeatures.push_back(feature);
+    // Release surface from previous attempt
+    release_surface();
+    
+    // Create new surface for this backend attempt
+    {
+      window::SurfaceLock surfaceLock;
+      if (!create_surface()) {
+        Log.warn("Failed to create surface for {}", magic_enum::enum_name(backend));
+        continue;
       }
     }
-#ifdef WEBGPU_DAWN
-    wgpu::DawnCacheDeviceDescriptor cacheDescriptor({
-        .isolationKey = nullptr,
-        .loadDataFunction = load_from_cache,
-        .storeDataFunction = store_to_cache,
-        .functionUserdata = nullptr,
-    });
+    
+    {
+      const wgpu::RequestAdapterOptions options{
+          .powerPreference = wgpu::PowerPreference::HighPerformance,
+          .backendType = backend,
+          // Don't pass compatibleSurface - OpenGLES backend needs EGL initialized first
+          // We'll configure the surface after getting the adapter
+      };
+      g_adapter = nullptr; // Reset adapter
+      const auto future = g_instance.RequestAdapter(
+          &options, wgpu::CallbackMode::WaitAnyOnly,
+          [](wgpu::RequestAdapterStatus status, wgpu::Adapter adapter, wgpu::StringView message) {
+            if (status == wgpu::RequestAdapterStatus::Success) {
+              g_adapter = std::move(adapter);
+            } else {
+              Log.warn("Adapter request failed: {}", message);
+            }
+          });
+      const auto status = g_instance.WaitAny(future, 5000000000);
+      if (status != wgpu::WaitStatus::Success) {
+        Log.warn("Failed to create adapter for {}: {}", magic_enum::enum_name(backend), magic_enum::enum_name(status));
+        continue;
+      }
+      if (!g_adapter) {
+        Log.warn("Failed to create adapter for {}", magic_enum::enum_name(backend));
+        continue;
+      }
+    }
+    Log.info("Successfully initialized {}", magic_enum::enum_name(backend));
+#ifdef __ANDROID__
+    __android_log_print(ANDROID_LOG_INFO, "aurora::gpu", "Successfully initialized %s", magic_enum::enum_name(backend).data());
+#endif
+    g_adapter.GetInfo(&g_adapterInfo);
+    g_backendType = g_adapterInfo.backendType;
+    const auto backendName = magic_enum::enum_name(g_backendType);
+    auto adapterName = g_adapterInfo.device;
+    if (adapterName.IsUndefined()) {
+      adapterName = wgpu::StringView("Unknown");
+    }
+    auto description = g_adapterInfo.description;
+    if (description.IsUndefined()) {
+      description = wgpu::StringView("Unknown");
+    }
+    Log.info("Graphics adapter information\n  API: {}\n  Device: {} ({})\n  Driver: {}", backendName, adapterName,
+             magic_enum::enum_name(g_adapterInfo.adapterType), description);
 
-    constexpr std::array enableToggles{
-    /* clang-format off */
+    {
+      wgpu::Limits supportedLimits{};
+      g_adapter.GetLimits(&supportedLimits);
+      const wgpu::Limits requiredLimits{
+          // Use "best" supported limits
+          .maxTextureDimension1D = supportedLimits.maxTextureDimension1D == 0 ? WGPU_LIMIT_U32_UNDEFINED
+                                                                              : supportedLimits.maxTextureDimension1D,
+          .maxTextureDimension2D = supportedLimits.maxTextureDimension2D == 0 ? WGPU_LIMIT_U32_UNDEFINED
+                                                                              : supportedLimits.maxTextureDimension2D,
+          .maxTextureDimension3D = supportedLimits.maxTextureDimension3D == 0 ? WGPU_LIMIT_U32_UNDEFINED
+                                                                              : supportedLimits.maxTextureDimension3D,
+          .maxTextureArrayLayers = supportedLimits.maxTextureArrayLayers == 0 ? WGPU_LIMIT_U32_UNDEFINED
+                                                                              : supportedLimits.maxTextureArrayLayers,
+          .maxDynamicStorageBuffersPerPipelineLayout = supportedLimits.maxDynamicStorageBuffersPerPipelineLayout == 0
+                                                               ? WGPU_LIMIT_U32_UNDEFINED
+                                                               : supportedLimits.maxDynamicStorageBuffersPerPipelineLayout,
+          .maxStorageBuffersPerShaderStage = supportedLimits.maxStorageBuffersPerShaderStage == 0
+                                                 ? WGPU_LIMIT_U32_UNDEFINED
+                                                 : supportedLimits.maxStorageBuffersPerShaderStage,
+          .minUniformBufferOffsetAlignment =
+              supportedLimits.minUniformBufferOffsetAlignment < 64 ? 64 : supportedLimits.minUniformBufferOffsetAlignment,
+          .minStorageBufferOffsetAlignment =
+              supportedLimits.minStorageBufferOffsetAlignment < 16 ? 16 : supportedLimits.minStorageBufferOffsetAlignment,
+      };
+      Log.info(
+          "Using limits:"
+          "\n  maxTextureDimension1D: {}"
+          "\n  maxTextureDimension2D: {}"
+          "\n  maxTextureDimension3D: {}"
+          "\n  maxTextureArrayLayers: {}"
+          "\n  maxDynamicStorageBuffersPerPipelineLayout: {}"
+          "\n  maxStorageBuffersPerShaderStage: {}"
+          "\n  minUniformBufferOffsetAlignment: {}"
+          "\n  minStorageBufferOffsetAlignment: {}",
+          requiredLimits.maxTextureDimension1D, requiredLimits.maxTextureDimension2D,
+          requiredLimits.maxTextureDimension3D, requiredLimits.maxTextureArrayLayers,
+          requiredLimits.maxDynamicStorageBuffersPerPipelineLayout, requiredLimits.maxStorageBuffersPerShaderStage,
+          requiredLimits.minUniformBufferOffsetAlignment, requiredLimits.minStorageBufferOffsetAlignment);
+      std::vector<wgpu::FeatureName> requiredFeatures;
+      wgpu::SupportedFeatures supportedFeatures;
+      g_adapter.GetFeatures(&supportedFeatures);
+      for (size_t i = 0; i < supportedFeatures.featureCount; ++i) {
+        const auto feature = supportedFeatures.features[i];
+        if (feature == wgpu::FeatureName::TextureCompressionBC) {
+          requiredFeatures.push_back(feature);
+        }
+      }
+#ifdef WEBGPU_DAWN
+      wgpu::DawnCacheDeviceDescriptor cacheDescriptor({
+          .isolationKey = nullptr,
+          .loadDataFunction = load_from_cache,
+          .storeDataFunction = store_to_cache,
+          .functionUserdata = nullptr,
+      });
+
+      constexpr std::array enableToggles{
+      /* clang-format off */
 #if _WIN32
-      "use_dxc",
+        "use_dxc",
 #ifndef NDEBUG
-      "emit_hlsl_debug_symbols",
+        "emit_hlsl_debug_symbols",
 #endif
 #endif
 #ifdef NDEBUG
-      "skip_validation",
-      "disable_robustness",
+        "skip_validation",
+        "disable_robustness",
 #endif
 #ifndef ANDROID
-      "use_user_defined_labels_in_backend",
+        "use_user_defined_labels_in_backend",
 #endif
-      "disable_symbol_renaming",
-      "enable_immediate_error_handling",
-        /* clang-format on */
-    };
-    const wgpu::DawnTogglesDescriptor togglesDescriptor({
-        .nextInChain = &cacheDescriptor,
-        .enabledToggleCount = enableToggles.size(),
-        .enabledToggles = enableToggles.data(),
-    });
+        "disable_symbol_renaming",
+        "enable_immediate_error_handling",
+          /* clang-format on */
+      };
+      const wgpu::DawnTogglesDescriptor togglesDescriptor({
+          .nextInChain = &cacheDescriptor,
+          .enabledToggleCount = enableToggles.size(),
+          .enabledToggles = enableToggles.data(),
+      });
 #endif
-    wgpu::DeviceDescriptor deviceDescriptor({
+      wgpu::DeviceDescriptor deviceDescriptor({
 #ifdef WEBGPU_DAWN
-        .nextInChain = &togglesDescriptor,
+          .nextInChain = &togglesDescriptor,
 #endif
-        .requiredFeatureCount = requiredFeatures.size(),
-        .requiredFeatures = requiredFeatures.data(),
-        .requiredLimits = &requiredLimits,
-    });
-    deviceDescriptor.SetUncapturedErrorCallback(
-        [](const wgpu::Device& device, wgpu::ErrorType type, wgpu::StringView message) {
-          FATAL("WebGPU error {}: {}", underlying(type), message);
-        });
-    deviceDescriptor.SetDeviceLostCallback(wgpu::CallbackMode::AllowSpontaneous,
+          .requiredFeatureCount = requiredFeatures.size(),
+          .requiredFeatures = requiredFeatures.data(),
+          .requiredLimits = &requiredLimits,
+      });
+      deviceDescriptor.SetUncapturedErrorCallback(
+          [](const wgpu::Device& device, wgpu::ErrorType type, wgpu::StringView message) {
+            FATAL("WebGPU error {}: {}", underlying(type), message);
+          });
+      deviceDescriptor.SetDeviceLostCallback(wgpu::CallbackMode::AllowSpontaneous,
                                            [](const wgpu::Device& device, wgpu::DeviceLostReason reason,
                                               wgpu::StringView message) { Log.warn("Device lost: {}", message); });
-    const auto future =
-        g_adapter.RequestDevice(&deviceDescriptor, wgpu::CallbackMode::WaitAnyOnly,
-                                [](wgpu::RequestDeviceStatus status, wgpu::Device device, wgpu::StringView message) {
+      const auto future =
+          g_adapter.RequestDevice(&deviceDescriptor, wgpu::CallbackMode::WaitAnyOnly,
+                                  [](wgpu::RequestDeviceStatus status, wgpu::Device device, wgpu::StringView message) {
                                   if (status == wgpu::RequestDeviceStatus::Success) {
                                     g_device = std::move(device);
                                   } else {
                                     Log.warn("Device request failed: {}", message);
                                   }
                                 });
-    const auto status = g_instance.WaitAny(future, 5000000000);
-    if (status != wgpu::WaitStatus::Success) {
-      Log.error("Failed to create device: {}", magic_enum::enum_name(status));
-      return false;
-    }
-    if (!g_device) {
-      return false;
+      const auto status = g_instance.WaitAny(future, 5000000000);
+      if (status != wgpu::WaitStatus::Success) {
+        Log.warn("Failed to create device for {}: {}", magic_enum::enum_name(backend), magic_enum::enum_name(status));
+        continue;
+      }
+      if (!g_device) {
+        Log.warn("Failed to create device for {}", magic_enum::enum_name(backend));
+        continue;
+      }
     }
     g_device.SetLoggingCallback([](wgpu::LoggingType type, wgpu::StringView message) {
       AuroraLogLevel level = LOG_FATAL;
@@ -604,46 +708,52 @@ bool initialize(AuroraBackend auroraBackend) {
       }
       Log.report(level, "WebGPU message: {}", message);
     });
-  }
-  g_queue = g_device.GetQueue();
+    g_queue = g_device.GetQueue();
 
-  const wgpu::Status status = g_surface.GetCapabilities(g_adapter, &g_surfaceCapabilities);
-  if (status != wgpu::Status::Success) {
-    Log.error("Failed to get surface capabilities: {}", magic_enum::enum_name(status));
-    return false;
+    const wgpu::Status status = g_surface.GetCapabilities(g_adapter, &g_surfaceCapabilities);
+    if (status != wgpu::Status::Success) {
+      Log.warn("Failed to get surface capabilities: {}", magic_enum::enum_name(status));
+      g_device = {};
+      continue;
+    }
+    if (g_surfaceCapabilities.formatCount == 0) {
+      Log.warn("Surface has no formats");
+      g_device = {};
+      continue;
+    }
+    if (g_surfaceCapabilities.presentModeCount == 0) {
+      Log.warn("Surface has no present modes");
+      g_device = {};
+      continue;
+    }
+    auto surfaceFormat = best_surface_format();
+    auto presentMode = best_present_mode(g_config.vsync);
+    Log.info("Using surface format {}, present mode {}", magic_enum::enum_name(surfaceFormat),
+             magic_enum::enum_name(presentMode));
+    const auto size = window::get_window_size();
+    g_graphicsConfig = GraphicsConfig{
+        .surfaceConfiguration =
+            wgpu::SurfaceConfiguration{
+                .format = surfaceFormat,
+                .usage = wgpu::TextureUsage::RenderAttachment,
+                .width = size.native_fb_width,
+                .height = size.native_fb_height,
+                .presentMode = presentMode,
+            },
+        .depthFormat = wgpu::TextureFormat::Depth32Float,
+        .msaaSamples = g_config.msaa,
+        .textureAnisotropy = g_config.maxTextureAnisotropy,
+    };
+    create_copy_pipeline();
+    {
+      window::SurfaceLock surfaceLock;
+      resize_swapchain(size.fb_width, size.fb_height, size.native_fb_width, size.native_fb_height, true);
+    }
+    return true;
   }
-  if (g_surfaceCapabilities.formatCount == 0) {
-    Log.error("Surface has no formats");
-    return false;
-  }
-  if (g_surfaceCapabilities.presentModeCount == 0) {
-    Log.error("Surface has no present modes");
-    return false;
-  }
-  auto surfaceFormat = best_surface_format();
-  auto presentMode = best_present_mode(g_config.vsync);
-  Log.info("Using surface format {}, present mode {}", magic_enum::enum_name(surfaceFormat),
-           magic_enum::enum_name(presentMode));
-  const auto size = window::get_window_size();
-  g_graphicsConfig = GraphicsConfig{
-      .surfaceConfiguration =
-          wgpu::SurfaceConfiguration{
-              .format = surfaceFormat,
-              .usage = wgpu::TextureUsage::RenderAttachment,
-              .width = size.native_fb_width,
-              .height = size.native_fb_height,
-              .presentMode = presentMode,
-          },
-      .depthFormat = wgpu::TextureFormat::Depth32Float,
-      .msaaSamples = g_config.msaa,
-      .textureAnisotropy = g_config.maxTextureAnisotropy,
-  };
-  create_copy_pipeline();
-  {
-    window::SurfaceLock surfaceLock;
-    resize_swapchain(size.fb_width, size.fb_height, size.native_fb_width, size.native_fb_height, true);
-  }
-  return true;
+  
+  Log.error("Failed to initialize any graphics backend");
+  return false;
 }
 
 void shutdown() {
